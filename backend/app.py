@@ -1,6 +1,6 @@
 """
 All-in-one Hugging Face Spaces entry point for BG Remover.
-Configured for Hugging Face ZeroGPU with @spaces.GPU decorator.
+Directly mounts FastAPI routes and includes both Gradio Blocks & FastAPI API routes.
 """
 import io
 import os
@@ -15,7 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from rembg import remove, new_session
 
-# Optional import for Hugging Face ZeroGPU
 try:
     import spaces
     has_spaces = True
@@ -51,7 +50,6 @@ def _run_removal_raw(image_bytes: bytes) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-# Apply @spaces.GPU decorator when running on Hugging Face ZeroGPU
 if has_spaces:
     @spaces.GPU
     def run_removal(image_bytes: bytes) -> bytes:
@@ -98,24 +96,10 @@ async def validate_upload(file: UploadFile) -> bytes:
         )
     return data
 
-# --- Create Gradio UI with Mounted FastAPI Routes ---
-with gr.Blocks(title=APP_NAME) as demo:
-    gr.Markdown(
-        """
-        # ✂️ BG Remover API
-        The AI backend is **ONLINE and running on Hugging Face ZeroGPU**!
-        
-        - **API Health**: [`/health`](/health)
-        - **API Info**: [`/api/info`](/api/info)
-        - **Background Removal Endpoint**: `POST /api/remove-background`
-        """
-    )
+# --- Create FastAPI Application First ---
+fastapi_app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# Access Gradio's internal FastAPI app directly
-app = demo.app
-
-# Enable CORS for external frontends (Vercel, localhost, etc.)
-app.add_middleware(
+fastapi_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
@@ -123,12 +107,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Attach REST endpoints directly to app
-@app.get("/health")
+@fastapi_app.get("/health")
 async def health():
     return {"status": "healthy", "service": APP_NAME}
 
-@app.get("/api/info")
+@fastapi_app.get("/api/info")
 async def get_info():
     return {
         "name": APP_NAME,
@@ -139,7 +122,7 @@ async def get_info():
         "output_format": "PNG with transparency",
     }
 
-@app.post("/api/remove-background")
+@fastapi_app.post("/api/remove-background")
 async def remove_bg_endpoint(file: UploadFile = File(...)):
     raw_bytes = await validate_upload(file)
     result_bytes = await remove_background_async(raw_bytes)
@@ -149,6 +132,18 @@ async def remove_bg_endpoint(file: UploadFile = File(...)):
         headers={"Content-Disposition": 'attachment; filename="bg-studio-result.png"'},
     )
 
-# Launch demo and block so process stays alive indefinitely
-demo.queue()
-demo.launch(ssr_mode=False)
+# --- Gradio UI Mounted on FastAPI ---
+with gr.Blocks(title=APP_NAME) as demo:
+    gr.Markdown(
+        """
+        # ✂️ BG Remover API
+        The AI backend is **ONLINE and running on Hugging Face ZeroGPU**!
+        
+        - **API Health**: [`/health`](/health)
+        - **API Info**: [`/api/info`](/api/info)
+        - **Background Removal**: `POST /api/remove-background`
+        """
+    )
+
+# Mount Gradio onto the FastAPI app so BOTH /health, /api/* AND the Gradio UI work
+app = gr.mount_gradio_app(fastapi_app, demo, path="/")

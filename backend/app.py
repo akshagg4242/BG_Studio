@@ -1,14 +1,12 @@
 """
 All-in-one Hugging Face Spaces entry point for BG Remover.
-Contains validation, U2-Net background removal, FastAPI routes, and Gradio mounting
-in a single self-contained file so no subdirectories are required.
+Compatible with Hugging Face's supervisor environment (no port 7860 collisions).
 """
 import io
 import os
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import List
 
 from PIL import Image
 import gradio as gr
@@ -84,10 +82,24 @@ async def validate_upload(file: UploadFile) -> bytes:
         )
     return data
 
-# --- FastAPI App ---
-fastapi_app = FastAPI(title=APP_NAME, version=APP_VERSION)
+# --- Create Gradio UI with Mounted FastAPI Routes ---
+with gr.Blocks(title=APP_NAME) as demo:
+    gr.Markdown(
+        """
+        # ✂️ BG Remover API
+        The AI backend is **ONLINE and running**!
+        
+        - **API Health**: [`/health`](/health)
+        - **API Info**: [`/api/info`](/api/info)
+        - **Background Removal Endpoint**: `POST /api/remove-background`
+        """
+    )
 
-fastapi_app.add_middleware(
+# Access Gradio's internal FastAPI app directly
+app = demo.app
+
+# Enable CORS for external frontends (Vercel, localhost, etc.)
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
@@ -95,15 +107,12 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
 )
 
-@fastapi_app.get("/")
-async def root():
-    return {"message": f"Welcome to {APP_NAME}", "version": APP_VERSION, "status": "running"}
-
-@fastapi_app.get("/health")
+# Attach REST endpoints directly to app
+@app.get("/health")
 async def health():
     return {"status": "healthy", "service": APP_NAME}
 
-@fastapi_app.get("/api/info")
+@app.get("/api/info")
 async def get_info():
     return {
         "name": APP_NAME,
@@ -114,7 +123,7 @@ async def get_info():
         "output_format": "PNG with transparency",
     }
 
-@fastapi_app.post("/api/remove-background")
+@app.post("/api/remove-background")
 async def remove_bg_endpoint(file: UploadFile = File(...)):
     raw_bytes = await validate_upload(file)
     result_bytes = await remove_background_async(raw_bytes)
@@ -124,22 +133,5 @@ async def remove_bg_endpoint(file: UploadFile = File(...)):
         headers={"Content-Disposition": 'attachment; filename="bg-studio-result.png"'},
     )
 
-# --- Gradio UI (Free Hugging Face Hosting) ---
-with gr.Blocks(title=APP_NAME) as demo:
-    gr.Markdown(
-        """
-        # ✂️ BG Remover API
-        The AI backend is **ONLINE and running**!
-        
-        - **API Health**: [`/health`](/health)
-        - **API Info**: [`/api/info`](/api/info)
-        - **Swagger Docs**: [`/docs`](/docs)
-        - **Background Removal**: `POST /api/remove-background`
-        """
-    )
-
-app = gr.mount_gradio_app(fastapi_app, demo, path="/gradio")
-
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    demo.launch()

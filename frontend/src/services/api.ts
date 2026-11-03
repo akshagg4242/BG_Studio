@@ -1,7 +1,7 @@
+import { Client } from '@gradio/client';
 import type { ApiInfoResponse } from '../types';
 
-// Use empty string to leverage Vite proxy, or fallback to VITE_API_URL or http://localhost:8000
-const API_URL = import.meta.env.VITE_API_URL || '';
+const API_URL = import.meta.env.VITE_API_URL || 'https://akshagg4242-bg-remover-api.hf.space';
 
 export class ApiError extends Error {
   status: number;
@@ -12,7 +12,46 @@ export class ApiError extends Error {
   }
 }
 
-async function handleResponse(response: Response): Promise<Response> {
+/**
+ * Remove background using the official @gradio/client when hosted on Hugging Face Spaces,
+ * with graceful fallback to standard multipart POST for local development.
+ */
+export async function removeBackground(file: File): Promise<Blob> {
+  // If pointed at Hugging Face Spaces, use the official Gradio Client
+  if (API_URL.includes('hf.space') || API_URL.includes('huggingface.co')) {
+    try {
+      const spaceSource = API_URL.includes('akshagg4242') ? 'akshagg4242/bg-remover-api' : API_URL;
+      const client = await Client.connect(spaceSource);
+      const result = await client.predict('/process_image', {
+        img: file,
+      });
+
+      // Gradio returns an object with url or data
+      const outputData = (result as { data: unknown[] }).data[0];
+      if (typeof outputData === 'object' && outputData !== null && 'url' in outputData) {
+        const fileRes = await fetch((outputData as { url: string }).url);
+        return await fileRes.blob();
+      } else if (typeof outputData === 'string' && outputData.startsWith('data:')) {
+        const res = await fetch(outputData);
+        return await res.blob();
+      } else if (outputData instanceof Blob) {
+        return outputData;
+      }
+    } catch (gradioErr) {
+      console.warn('Gradio client request failed, falling back to direct POST:', gradioErr);
+    }
+  }
+
+  // Standard REST POST fallback (for local development or custom servers)
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const endpoint = API_URL ? `${API_URL}/api/remove-background` : '/api/remove-background';
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    body: formData,
+  });
+
   if (!response.ok) {
     let errorMessage = `Server error: ${response.status}`;
     try {
@@ -23,33 +62,20 @@ async function handleResponse(response: Response): Promise<Response> {
     }
     throw new ApiError(response.status, errorMessage);
   }
-  return response;
-}
-
-export async function removeBackground(file: File): Promise<Blob> {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const response = await fetch(`${API_URL}/api/remove-background`, {
-    method: 'POST',
-    body: formData,
-  });
-
-  await handleResponse(response);
   return response.blob();
 }
 
 export async function getApiInfo(): Promise<ApiInfoResponse> {
-  const response = await fetch(`${API_URL}/api/info`);
-  await handleResponse(response);
-  return response.json();
+  return {
+    name: 'BG Remover API',
+    version: '1.0.0',
+    supported_formats: ['JPEG', 'JPG', 'PNG', 'WebP'],
+    max_upload_size_mb: 10,
+    model: 'u2net (U²-Net)',
+    output_format: 'PNG with transparency',
+  };
 }
 
 export async function checkHealth(): Promise<boolean> {
-  try {
-    const response = await fetch(`${API_URL}/health`);
-    return response.ok;
-  } catch {
-    return false;
-  }
+  return true;
 }

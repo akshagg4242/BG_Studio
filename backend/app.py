@@ -1,6 +1,7 @@
 """
-All-in-one Hugging Face Spaces entry point for BG Remover on ZeroGPU.
-Uses standard Gradio Blocks with demo.launch() and mounts FastAPI endpoints on demo.app.
+All-in-one Hugging Face Spaces entry point for BG Remover.
+Configures CORS and starlette middleware so cross-origin requests from Vercel
+are NEVER blocked with 403 Forbidden.
 """
 import io
 import os
@@ -9,12 +10,12 @@ from typing import Optional
 
 from PIL import Image
 import gradio as gr
-from fastapi import File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from rembg import remove, new_session
 
-# Hugging Face ZeroGPU support
+# Optional ZeroGPU import
 try:
     import spaces
     has_spaces = True
@@ -38,17 +39,16 @@ session = new_session("u2net")
 logger.info("Session ready.")
 
 def _raw_remove(image_input):
-    """Core removal function accepting bytes or PIL Image."""
+    """Core background removal function."""
     if isinstance(image_input, bytes):
         output_bytes = remove(image_input, session=session)
         img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
     else:
-        # PIL Image from Gradio UI
         img = remove(image_input, session=session)
     return img
 
 if has_spaces:
-    @spaces.GPU
+    @spaces.GPU(duration=30)
     def process_image(img):
         return _raw_remove(img)
 else:
@@ -103,6 +103,21 @@ with gr.Blocks(title=APP_NAME) as demo:
 # --- Attach REST API Routes directly to Gradio's internal FastAPI app ---
 api_app = demo.app
 
+# Custom middleware to explicitly handle CORS preflight OPTIONS and bypass 403 CSRF checks
+@api_app.middleware("http")
+async def cors_handler(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
 api_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -129,16 +144,18 @@ def info_endpoint():
 @api_app.post("/api/remove-background")
 async def remove_background_endpoint(file: UploadFile = File(...)):
     raw_bytes = await validate_upload(file)
-    # Process using the ZeroGPU-decorated function
     output_pil = process_image(raw_bytes)
     buf = io.BytesIO()
     output_pil.save(buf, format="PNG")
     return Response(
         content=buf.getvalue(),
         media_type="image/png",
-        headers={"Content-Disposition": 'attachment; filename="bg-studio-result.png"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="bg-studio-result.png"',
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
-# Standard Gradio launch (Required for Hugging Face ZeroGPU)
+# Standard Gradio launch
 demo.queue()
 demo.launch()

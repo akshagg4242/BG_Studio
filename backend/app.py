@@ -1,20 +1,20 @@
 """
-All-in-one Hugging Face Spaces entry point for BG Remover.
-Directly mounts FastAPI routes and includes both Gradio Blocks & FastAPI API routes.
+All-in-one Hugging Face Spaces entry point for BG Remover on ZeroGPU.
+Uses standard Gradio Blocks with demo.launch() and mounts FastAPI endpoints on demo.app.
 """
 import io
 import os
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from typing import Optional
 
 from PIL import Image
 import gradio as gr
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from rembg import remove, new_session
 
+# Hugging Face ZeroGPU support
 try:
     import spaces
     has_spaces = True
@@ -32,38 +32,30 @@ MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 
-# --- Background Removal Service ---
-_executor = ThreadPoolExecutor(max_workers=2)
+# --- Model Session ---
+logger.info("Initializing rembg u2net session...")
+session = new_session("u2net")
+logger.info("Session ready.")
 
-@lru_cache(maxsize=1)
-def _get_session():
-    logger.info("Initialising rembg u2net model session...")
-    session = new_session("u2net")
-    logger.info("rembg model session ready.")
-    return session
-
-def _run_removal_raw(image_bytes: bytes) -> bytes:
-    session = _get_session()
-    output_bytes = remove(image_bytes, session=session)
-    img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+def _raw_remove(image_input):
+    """Core removal function accepting bytes or PIL Image."""
+    if isinstance(image_input, bytes):
+        output_bytes = remove(image_input, session=session)
+        img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+    else:
+        # PIL Image from Gradio UI
+        img = remove(image_input, session=session)
+    return img
 
 if has_spaces:
     @spaces.GPU
-    def run_removal(image_bytes: bytes) -> bytes:
-        return _run_removal_raw(image_bytes)
+    def process_image(img):
+        return _raw_remove(img)
 else:
-    def run_removal(image_bytes: bytes) -> bytes:
-        return _run_removal_raw(image_bytes)
+    def process_image(img):
+        return _raw_remove(img)
 
-async def remove_background_async(image_bytes: bytes) -> bytes:
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, run_removal, image_bytes)
-
-# --- Validation Utilities ---
+# --- Validation Utilities for FastAPI ---
 async def validate_upload(file: UploadFile) -> bytes:
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
@@ -87,19 +79,31 @@ async def validate_upload(file: UploadFile) -> bytes:
             detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB."
         )
     try:
-        img = Image.open(io.BytesIO(data))
-        img.verify()
+        test_img = Image.open(io.BytesIO(data))
+        test_img.verify()
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot open image file: {str(exc)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid image file: {str(exc)}")
     return data
 
-# --- Create FastAPI Application First ---
-fastapi_app = FastAPI(title=APP_NAME, version=APP_VERSION)
+# --- Gradio UI ---
+with gr.Blocks(title=APP_NAME) as demo:
+    gr.Markdown(
+        """
+        # ✂️ BG Remover AI
+        Upload an image to remove its background using U²-Net AI on ZeroGPU.
+        """
+    )
+    with gr.Row():
+        input_img = gr.Image(type="pil", label="Upload Image")
+        output_img = gr.Image(type="pil", label="Background Removed (Transparent PNG)")
+    
+    btn = gr.Button("Remove Background", variant="primary")
+    btn.click(fn=process_image, inputs=input_img, outputs=output_img)
 
-fastapi_app.add_middleware(
+# --- Attach REST API Routes directly to Gradio's internal FastAPI app ---
+api_app = demo.app
+
+api_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
@@ -107,12 +111,12 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
 )
 
-@fastapi_app.get("/health")
-async def health():
+@api_app.get("/health")
+def health_endpoint():
     return {"status": "healthy", "service": APP_NAME}
 
-@fastapi_app.get("/api/info")
-async def get_info():
+@api_app.get("/api/info")
+def info_endpoint():
     return {
         "name": APP_NAME,
         "version": APP_VERSION,
@@ -122,28 +126,19 @@ async def get_info():
         "output_format": "PNG with transparency",
     }
 
-@fastapi_app.post("/api/remove-background")
-async def remove_bg_endpoint(file: UploadFile = File(...)):
+@api_app.post("/api/remove-background")
+async def remove_background_endpoint(file: UploadFile = File(...)):
     raw_bytes = await validate_upload(file)
-    result_bytes = await remove_background_async(raw_bytes)
+    # Process using the ZeroGPU-decorated function
+    output_pil = process_image(raw_bytes)
+    buf = io.BytesIO()
+    output_pil.save(buf, format="PNG")
     return Response(
-        content=result_bytes,
+        content=buf.getvalue(),
         media_type="image/png",
         headers={"Content-Disposition": 'attachment; filename="bg-studio-result.png"'},
     )
 
-# --- Gradio UI Mounted on FastAPI ---
-with gr.Blocks(title=APP_NAME) as demo:
-    gr.Markdown(
-        """
-        # ✂️ BG Remover API
-        The AI backend is **ONLINE and running on Hugging Face ZeroGPU**!
-        
-        - **API Health**: [`/health`](/health)
-        - **API Info**: [`/api/info`](/api/info)
-        - **Background Removal**: `POST /api/remove-background`
-        """
-    )
-
-# Mount Gradio onto the FastAPI app so BOTH /health, /api/* AND the Gradio UI work
-app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+# Standard Gradio launch (Required for Hugging Face ZeroGPU)
+demo.queue()
+demo.launch()

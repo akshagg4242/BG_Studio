@@ -1,6 +1,6 @@
 """
 All-in-one Hugging Face Spaces entry point for BG Remover.
-Compatible with Hugging Face's supervisor environment (no port 7860 collisions).
+Keeps server process alive and blocking without exiting.
 """
 import io
 import os
@@ -133,5 +133,6 @@ async def remove_bg_endpoint(file: UploadFile = File(...)):
         headers={"Content-Disposition": 'attachment; filename="bg-studio-result.png"'},
     )
 
-if __name__ == "__main__":
-    demo.launch()
+# Launch demo and block so process stays alive indefinitely
+demo.queue()
+demo.launch(ssr_mode=False)

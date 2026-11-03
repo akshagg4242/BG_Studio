@@ -1,6 +1,6 @@
 """
 All-in-one Hugging Face Spaces entry point for BG Remover.
-Keeps server process alive and blocking without exiting.
+Configured for Hugging Face ZeroGPU with @spaces.GPU decorator.
 """
 import io
 import os
@@ -14,6 +14,13 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from rembg import remove, new_session
+
+# Optional import for Hugging Face ZeroGPU
+try:
+    import spaces
+    has_spaces = True
+except ImportError:
+    has_spaces = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,7 +43,7 @@ def _get_session():
     logger.info("rembg model session ready.")
     return session
 
-def _run_removal(image_bytes: bytes) -> bytes:
+def _run_removal_raw(image_bytes: bytes) -> bytes:
     session = _get_session()
     output_bytes = remove(image_bytes, session=session)
     img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
@@ -44,10 +51,19 @@ def _run_removal(image_bytes: bytes) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+# Apply @spaces.GPU decorator when running on Hugging Face ZeroGPU
+if has_spaces:
+    @spaces.GPU
+    def run_removal(image_bytes: bytes) -> bytes:
+        return _run_removal_raw(image_bytes)
+else:
+    def run_removal(image_bytes: bytes) -> bytes:
+        return _run_removal_raw(image_bytes)
+
 async def remove_background_async(image_bytes: bytes) -> bytes:
     import asyncio
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, _run_removal, image_bytes)
+    return await loop.run_in_executor(_executor, run_removal, image_bytes)
 
 # --- Validation Utilities ---
 async def validate_upload(file: UploadFile) -> bytes:
@@ -87,7 +103,7 @@ with gr.Blocks(title=APP_NAME) as demo:
     gr.Markdown(
         """
         # ✂️ BG Remover API
-        The AI backend is **ONLINE and running**!
+        The AI backend is **ONLINE and running on Hugging Face ZeroGPU**!
         
         - **API Health**: [`/health`](/health)
         - **API Info**: [`/api/info`](/api/info)
